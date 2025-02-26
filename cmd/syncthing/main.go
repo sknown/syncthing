@@ -1,9 +1,3 @@
-// Copyright (C) 2014 The Syncthing Authors.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at https://mozilla.org/MPL/2.0/.
-
 package main
 
 import (
@@ -51,7 +45,6 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/syncthing"
-	"github.com/syncthing/syncthing/lib/upgrade"
 )
 
 const (
@@ -63,9 +56,9 @@ const (
 The --logflags value is a sum of the following:
 
    1  Date
-   2  Time
-   4  Microsecond time
-   8  Long filename
+    2  Time
+    4  Microsecond time
+    8  Long filename
   16  Short filename
 
 I.e. to prefix each log line with time and filename, set --logflags=18 (2 + 16
@@ -158,9 +151,6 @@ type serveOptions struct {
 	Paths            bool   `help:"Show configuration paths"`
 	Paused           bool   `help:"Start with all devices and folders paused"`
 	Unpaused         bool   `help:"Start with all devices and folders unpaused"`
-	Upgrade          bool   `help:"Perform upgrade"`
-	UpgradeCheck     bool   `help:"Check for available upgrade"`
-	UpgradeTo        string `placeholder:"URL" help:"Force upgrade directly from specified URL"`
 	Verbose          bool   `help:"Print verbose log output"`
 	Version          bool   `help:"Show version"`
 
@@ -355,45 +345,6 @@ func (options serveOptions) Run() error {
 		os.Exit(svcutil.ExitError.AsInt())
 	}
 
-	if options.UpgradeTo != "" {
-		err := upgrade.ToURL(options.UpgradeTo)
-		if err != nil {
-			l.Warnln("Error while Upgrading:", err)
-			os.Exit(svcutil.ExitError.AsInt())
-		}
-		l.Infoln("Upgraded from", options.UpgradeTo)
-		return nil
-	}
-
-	if options.UpgradeCheck {
-		if _, err := checkUpgrade(); err != nil {
-			l.Warnln("Checking for upgrade:", err)
-			os.Exit(exitCodeForUpgrade(err))
-		}
-		return nil
-	}
-
-	if options.Upgrade {
-		release, err := checkUpgrade()
-		if err == nil {
-			// Use leveldb database locks to protect against concurrent upgrades
-			var ldb backend.Backend
-			ldb, err = syncthing.OpenDBBackend(locations.Get(locations.Database), config.TuningAuto)
-			if err != nil {
-				err = upgradeViaRest()
-			} else {
-				_ = ldb.Close()
-				err = upgrade.To(release)
-			}
-		}
-		if err != nil {
-			l.Warnln("Upgrade:", err)
-			os.Exit(exitCodeForUpgrade(err))
-		}
-		l.Infof("Upgraded to %q", release.Tag)
-		os.Exit(svcutil.ExitUpgrade.AsInt())
-	}
-
 	if options.DebugResetDatabase {
 		if err := resetDB(); err != nil {
 			l.Warnln("Resetting database:", err)
@@ -454,65 +405,6 @@ type errNoUpgrade struct {
 
 func (e *errNoUpgrade) Error() string {
 	return fmt.Sprintf("no upgrade available (current %q >= latest %q).", e.current, e.latest)
-}
-
-func checkUpgrade() (upgrade.Release, error) {
-	cfg, err := loadOrDefaultConfig()
-	if err != nil {
-		return upgrade.Release{}, err
-	}
-	opts := cfg.Options()
-	release, err := upgrade.LatestRelease(opts.ReleasesURL, build.Version, opts.UpgradeToPreReleases)
-	if err != nil {
-		return upgrade.Release{}, err
-	}
-
-	if upgrade.CompareVersions(release.Tag, build.Version) <= 0 {
-		return upgrade.Release{}, &errNoUpgrade{build.Version, release.Tag}
-	}
-
-	l.Infof("Upgrade available (current %q < latest %q)", build.Version, release.Tag)
-	return release, nil
-}
-
-func upgradeViaRest() error {
-	cfg, err := loadOrDefaultConfig()
-	if err != nil {
-		return err
-	}
-
-	u, err := url.Parse(cfg.GUI().URL())
-	if err != nil {
-		return err
-	}
-	u.Path = path.Join(u.Path, "rest/system/upgrade")
-	target := u.String()
-	r, _ := http.NewRequest("POST", target, nil)
-	r.Header.Set("X-API-Key", cfg.GUI().APIKey)
-
-	tr := &http.Transport{
-		DialContext:     dialer.DialContext,
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   60 * time.Second,
-	}
-	resp, err := client.Do(r)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != 200 {
-		bs, err := io.ReadAll(resp.Body)
-		defer resp.Body.Close()
-		if err != nil {
-			return err
-		}
-		return errors.New(string(bs))
-	}
-
-	return err
 }
 
 func syncthingMain(options serveOptions) {
