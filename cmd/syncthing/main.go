@@ -1,9 +1,3 @@
-// Copyright (C) 2014 The Syncthing Authors.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at https://mozilla.org/MPL/2.0/.
-
 package main
 
 import (
@@ -51,78 +45,10 @@ import (
 	"github.com/syncthing/syncthing/lib/protocol"
 	"github.com/syncthing/syncthing/lib/svcutil"
 	"github.com/syncthing/syncthing/lib/syncthing"
-	"github.com/syncthing/syncthing/lib/upgrade"
 )
 
 const (
 	sigTerm = syscall.Signal(15)
-)
-
-const (
-	extraUsage = `
-The --logflags value is a sum of the following:
-
-   1  Date
-   2  Time
-   4  Microsecond time
-   8  Long filename
-  16  Short filename
-
-I.e. to prefix each log line with time and filename, set --logflags=18 (2 + 16
-from above). The value 0 is used to disable all of the above. The default is
-to show date and time (3).
-
-Logging always happens to the command line (stdout) and optionally to the
-file at the path specified by --logfile=path. In addition to an path, the special
-values "default" and "-" may be used. The former logs to DATADIR/syncthing.log
-(see --data), which is the default on Windows, and the latter only to stdout,
-no file, which is the default anywhere else.
-
-
-Development Settings
---------------------
-
-The following environment variables modify Syncthing's behavior in ways that
-are mostly useful for developers. Use with care. See also the --debug-* options
-above.
-
- STTRACE           A comma separated string of facilities to trace. The valid
-                   facility strings are listed below.
-
- STLOCKTHRESHOLD   Used for debugging internal deadlocks; sets debug
-                   sensitivity.  Use only under direction of a developer.
-
- STVERSIONEXTRA    Add extra information to the version string in logs and the
-                   version line in the GUI. Can be set to the name of a wrapper
-                   or tool controlling syncthing to communicate this to the end
-                   user.
-
- GOMAXPROCS        Set the maximum number of CPU cores to use. Defaults to all
-                   available CPU cores.
-
- GOGC              Percentage of heap growth at which to trigger GC. Default is
-                   100. Lower numbers keep peak memory usage down, at the price
-                   of CPU usage (i.e. performance).
-
-
-Debugging Facilities
---------------------
-
-The following are valid values for the STTRACE variable:
-
-%s
-`
-)
-
-var (
-	upgradeCheckInterval = 5 * time.Minute
-	upgradeRetryInterval = time.Hour
-	upgradeCheckKey      = "lastUpgradeCheck"
-	upgradeTimeKey       = "lastUpgradeTime"
-	upgradeVersionKey    = "lastUpgradeVersion"
-
-	errTooEarlyUpgradeCheck = fmt.Errorf("last upgrade check happened less than %v ago, skipping", upgradeCheckInterval)
-	errTooEarlyUpgrade      = fmt.Errorf("last upgrade happened less than %v ago, skipping", upgradeRetryInterval)
 )
 
 // The entrypoint struct is the main entry point for the command line parser. The
@@ -158,9 +84,6 @@ type serveOptions struct {
 	Paths            bool   `help:"Show configuration paths"`
 	Paused           bool   `help:"Start with all devices and folders paused"`
 	Unpaused         bool   `help:"Start with all devices and folders unpaused"`
-	Upgrade          bool   `help:"Perform upgrade"`
-	UpgradeCheck     bool   `help:"Check for available upgrade"`
-	UpgradeTo        string `placeholder:"URL" help:"Force upgrade directly from specified URL"`
 	Verbose          bool   `help:"Print verbose log output"`
 	Version          bool   `help:"Show version"`
 
@@ -355,45 +278,6 @@ func (options serveOptions) Run() error {
 		os.Exit(svcutil.ExitError.AsInt())
 	}
 
-	if options.UpgradeTo != "" {
-		err := upgrade.ToURL(options.UpgradeTo)
-		if err != nil {
-			l.Warnln("Error while Upgrading:", err)
-			os.Exit(svcutil.ExitError.AsInt())
-		}
-		l.Infoln("Upgraded from", options.UpgradeTo)
-		return nil
-	}
-
-	if options.UpgradeCheck {
-		if _, err := checkUpgrade(); err != nil {
-			l.Warnln("Checking for upgrade:", err)
-			os.Exit(exitCodeForUpgrade(err))
-		}
-		return nil
-	}
-
-	if options.Upgrade {
-		release, err := checkUpgrade()
-		if err == nil {
-			// Use leveldb database locks to protect against concurrent upgrades
-			var ldb backend.Backend
-			ldb, err = syncthing.OpenDBBackend(locations.Get(locations.Database), config.TuningAuto)
-			if err != nil {
-				err = upgradeViaRest()
-			} else {
-				_ = ldb.Close()
-				err = upgrade.To(release)
-			}
-		}
-		if err != nil {
-			l.Warnln("Upgrade:", err)
-			os.Exit(exitCodeForUpgrade(err))
-		}
-		l.Infof("Upgraded to %q", release.Tag)
-		os.Exit(svcutil.ExitUpgrade.AsInt())
-	}
-
 	if options.DebugResetDatabase {
 		if err := resetDB(); err != nil {
 			l.Warnln("Resetting database:", err)
@@ -446,73 +330,6 @@ func debugFacilities() string {
 		fmt.Fprintf(b, " %-*s - %s\n", maxLen, name, facilities[name])
 	}
 	return b.String()
-}
-
-type errNoUpgrade struct {
-	current, latest string
-}
-
-func (e *errNoUpgrade) Error() string {
-	return fmt.Sprintf("no upgrade available (current %q >= latest %q).", e.current, e.latest)
-}
-
-func checkUpgrade() (upgrade.Release, error) {
-	cfg, err := loadOrDefaultConfig()
-	if err != nil {
-		return upgrade.Release{}, err
-	}
-	opts := cfg.Options()
-	release, err := upgrade.LatestRelease(opts.ReleasesURL, build.Version, opts.UpgradeToPreReleases)
-	if err != nil {
-		return upgrade.Release{}, err
-	}
-
-	if upgrade.CompareVersions(release.Tag, build.Version) <= 0 {
-		return upgrade.Release{}, &errNoUpgrade{build.Version, release.Tag}
-	}
-
-	l.Infof("Upgrade available (current %q < latest %q)", build.Version, release.Tag)
-	return release, nil
-}
-
-func upgradeViaRest() error {
-	cfg, err := loadOrDefaultConfig()
-	if err != nil {
-		return err
-	}
-
-	u, err := url.Parse(cfg.GUI().URL())
-	if err != nil {
-		return err
-	}
-	u.Path = path.Join(u.Path, "rest/system/upgrade")
-	target := u.String()
-	r, _ := http.NewRequest("POST", target, nil)
-	r.Header.Set("X-API-Key", cfg.GUI().APIKey)
-
-	tr := &http.Transport{
-		DialContext:     dialer.DialContext,
-		Proxy:           http.ProxyFromEnvironment,
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	client := &http.Client{
-		Transport: tr,
-		Timeout:   60 * time.Second,
-	}
-	resp, err := client.Do(r)
-	if err != nil {
-		return err
-	}
-	if resp.StatusCode != 200 {
-		bs, err := io.ReadAll(resp.Body)
-		defer resp.Body.Close()
-		if err != nil {
-			return err
-		}
-		return errors.New(string(bs))
-	}
-
-	return err
 }
 
 func syncthingMain(options serveOptions) {
@@ -587,29 +404,6 @@ func syncthingMain(options serveOptions) {
 		os.Exit(1)
 	}
 
-	// Check if auto-upgrades is possible, and if yes, and it's enabled do an initial
-	// upgrade immediately. The auto-upgrade routine can only be started
-	// later after App is initialised.
-
-	autoUpgradePossible := autoUpgradePossible(options)
-	if autoUpgradePossible && cfgWrapper.Options().AutoUpgradeEnabled() {
-		// try to do upgrade directly and log the error if relevant.
-		release, err := initialAutoUpgradeCheck(db.NewMiscDataNamespace(ldb))
-		if err == nil {
-			err = upgrade.To(release)
-		}
-		if err != nil {
-			if _, ok := err.(*errNoUpgrade); ok || err == errTooEarlyUpgradeCheck || err == errTooEarlyUpgrade {
-				l.Debugln("Initial automatic upgrade:", err)
-			} else {
-				l.Infoln("Initial automatic upgrade:", err)
-			}
-		} else {
-			l.Infof("Upgraded to %q, exiting now.", release.Tag)
-			os.Exit(svcutil.ExitUpgrade.AsInt())
-		}
-	}
-
 	if options.Unpaused {
 		setPauseState(cfgWrapper, false)
 	} else if options.Paused {
@@ -638,10 +432,6 @@ func syncthingMain(options serveOptions) {
 	if err != nil {
 		l.Warnln("Failed to start Syncthing:", err)
 		os.Exit(svcutil.ExitError.AsInt())
-	}
-
-	if autoUpgradePossible {
-		go autoUpgrade(cfgWrapper, app, evLogger)
 	}
 
 	setupSignalHandling(app)
@@ -753,94 +543,6 @@ func resetDB() error {
 	return os.RemoveAll(locations.Get(locations.Database))
 }
 
-func autoUpgradePossible(options serveOptions) bool {
-	if upgrade.DisabledByCompilation {
-		return false
-	}
-	if options.NoUpgrade {
-		l.Infof("No automatic upgrades; STNOUPGRADE environment variable defined.")
-		return false
-	}
-	return true
-}
-
-func autoUpgrade(cfg config.Wrapper, app *syncthing.App, evLogger events.Logger) {
-	timer := time.NewTimer(upgradeCheckInterval)
-	sub := evLogger.Subscribe(events.DeviceConnected)
-	for {
-		select {
-		case event := <-sub.C():
-			data, ok := event.Data.(map[string]string)
-			if !ok || data["clientName"] != "syncthing" || upgrade.CompareVersions(data["clientVersion"], build.Version) != upgrade.Newer {
-				continue
-			}
-			if cfg.Options().AutoUpgradeEnabled() {
-				l.Infof("Connected to device %s with a newer version (current %q < remote %q). Checking for upgrades.", data["id"], build.Version, data["clientVersion"])
-			}
-		case <-timer.C:
-		}
-
-		opts := cfg.Options()
-		if !opts.AutoUpgradeEnabled() {
-			timer.Reset(upgradeCheckInterval)
-			continue
-		}
-
-		checkInterval := time.Duration(opts.AutoUpgradeIntervalH) * time.Hour
-		rel, err := upgrade.LatestRelease(opts.ReleasesURL, build.Version, opts.UpgradeToPreReleases)
-		if err == upgrade.ErrUpgradeUnsupported {
-			sub.Unsubscribe()
-			return
-		}
-		if err != nil {
-			// Don't complain too loudly here; we might simply not have
-			// internet connectivity, or the upgrade server might be down.
-			l.Infoln("Automatic upgrade:", err)
-			timer.Reset(checkInterval)
-			continue
-		}
-
-		if upgrade.CompareVersions(rel.Tag, build.Version) != upgrade.Newer {
-			// Skip equal, older or majorly newer (incompatible) versions
-			timer.Reset(checkInterval)
-			continue
-		}
-
-		l.Infof("Automatic upgrade (current %q < latest %q)", build.Version, rel.Tag)
-		err = upgrade.To(rel)
-		if err != nil {
-			l.Warnln("Automatic upgrade:", err)
-			timer.Reset(checkInterval)
-			continue
-		}
-		sub.Unsubscribe()
-		l.Warnf("Automatically upgraded to version %q. Restarting in 1 minute.", rel.Tag)
-		time.Sleep(time.Minute)
-		app.Stop(svcutil.ExitUpgrade)
-		return
-	}
-}
-
-func initialAutoUpgradeCheck(misc *db.NamespacedKV) (upgrade.Release, error) {
-	if last, ok, err := misc.Time(upgradeCheckKey); err == nil && ok && time.Since(last) < upgradeCheckInterval {
-		return upgrade.Release{}, errTooEarlyUpgradeCheck
-	}
-	_ = misc.PutTime(upgradeCheckKey, time.Now())
-	release, err := checkUpgrade()
-	if err != nil {
-		return upgrade.Release{}, err
-	}
-	if lastVersion, ok, err := misc.String(upgradeVersionKey); err == nil && ok && lastVersion == release.Tag {
-		// Only check time if we try to upgrade to the same release.
-		if lastTime, ok, err := misc.Time(upgradeTimeKey); err == nil && ok && time.Since(lastTime) < upgradeRetryInterval {
-			return upgrade.Release{}, errTooEarlyUpgrade
-		}
-	}
-	_ = misc.PutString(upgradeVersionKey, release.Tag)
-	_ = misc.PutTime(upgradeTimeKey, time.Now())
-	return release, nil
-}
-
 // cleanConfigDirectory removes old, unused configuration and index formats, a
 // suitable time after they have gone out of fashion.
 func cleanConfigDirectory() {
@@ -898,13 +600,6 @@ func setPauseState(cfgWrapper config.Wrapper, paused bool) {
 		l.Warnln("Cannot adjust paused state:", err)
 		os.Exit(svcutil.ExitError.AsInt())
 	}
-}
-
-func exitCodeForUpgrade(err error) int {
-	if _, ok := err.(*errNoUpgrade); ok {
-		return svcutil.ExitNoUpgradeAvailable.AsInt()
-	}
-	return svcutil.ExitError.AsInt()
 }
 
 // convertLegacyArgs returns the slice of arguments with single dash long

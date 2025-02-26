@@ -1,9 +1,3 @@
-// Copyright (C) 2014 The Syncthing Authors.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at https://mozilla.org/MPL/2.0/.
-
 package main
 
 import (
@@ -179,15 +173,6 @@ func monitorMain(options serveOptions) {
 		if exiterr, ok := err.(*exec.ExitError); ok {
 			exitCode := exiterr.ExitCode()
 			if stopped || options.NoRestart {
-				os.Exit(exitCode)
-			}
-			if exitCode == svcutil.ExitUpgrade.AsInt() {
-				// Restart the monitor process to release the .old
-				// binary as part of the upgrade process.
-				l.Infoln("Restarting monitor...")
-				if err = restartMonitor(binary, args); err != nil {
-					l.Warnln("Restart:", err)
-				}
 				os.Exit(exitCode)
 			}
 		}
