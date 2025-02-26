@@ -1,9 +1,3 @@
-// Copyright (C) 2019 The Syncthing Authors.
-//
-// This Source Code Form is subject to the terms of the Mozilla Public
-// License, v. 2.0. If a copy of the MPL was not distributed with this file,
-// You can obtain one at https://mozilla.org/MPL/2.0/.
-
 package cli
 
 import (
@@ -28,7 +22,6 @@ type defaultIgnoresCommand struct {
 type operationCommand struct {
 	Restart        struct{}              `cmd:"" help:"Restart syncthing"`
 	Shutdown       struct{}              `cmd:"" help:"Shutdown syncthing"`
-	Upgrade        struct{}              `cmd:"" help:"Upgrade syncthing (if a newer version is available)"`
 	FolderOverride folderOverrideCommand `cmd:"" help:"Override changes on folder (remote for sendonly, local for receiveonly). WARNING: Destructive - deletes/changes your data"`
 	DefaultIgnores defaultIgnoresCommand `cmd:"" help:"Set the default ignores (config) from a file"`
 }
@@ -41,8 +34,6 @@ func (*operationCommand) Run(ctx Context, kongCtx *kong.Context) error {
 		return emptyPost("system/restart", f)
 	case "shutdown":
 		return emptyPost("system/shutdown", f)
-	case "upgrade":
-		return emptyPost("system/upgrade", f)
 	}
 	return nil
 }
